@@ -40,6 +40,8 @@ def default_img_loader(cfg, data, ):
     else:
         if cfg.MODEL.JEPA_ENABLE and len(data) == 8:
             samples, targets, camids,_, clothes,meta,text, jepa_paths = data
+        elif cfg.MODEL.JEPA_ENABLE and len(data) == 7:
+            samples, targets, camids,_, clothes,meta, jepa_paths = data
         else:
             samples, targets, camids,_, clothes,meta,text = data
         meta = None
@@ -52,12 +54,17 @@ def default_img_loader(cfg, data, ):
 
 
 def maybe_load_jepa_tokens(cfg, jepa_paths, device, training_mode):
-    if not cfg.MODEL.JEPA_ENABLE or training_mode != "video":
+    if not cfg.MODEL.JEPA_ENABLE:
+        return None
+    if training_mode not in ("image", "video"):
         return None
     if jepa_paths is None:
         raise RuntimeError("MODEL.JEPA_ENABLE is True, but the dataloader did not return JEPA frame paths.")
     from tools.jepa_lazy_cache import load_jepa_batch
-    return load_jepa_batch(cfg, jepa_paths, device, write_cache=cfg.MODEL.JEPA_WRITE_TRAIN_CACHE)
+    write_cache = cfg.MODEL.JEPA_WRITE_TRAIN_CACHE
+    if training_mode == "image":
+        write_cache = cfg.MODEL.JEPA_WRITE_IMAGE_CACHE
+    return load_jepa_batch(cfg, jepa_paths, device, write_cache=write_cache)
 
 def evaluate_fn(cfg, model, val_loader, logger, evaluator_diff, evaluator_same, val_loader_same, device, epoch, rank_writer, mAP_writer, dataset, eval_mode=None, evaluator=None, dump=None, evaluator_general=None, queryloader=None, galleryloader=None , aux_dump=None):
     model.eval()
@@ -641,4 +648,3 @@ def test_w_index_w_aux(cfg, model, evaluator, val_loader, logger, device, epoch=
         dist.barrier()
     model.dump_aux = False 
     return rank1, mAP
-

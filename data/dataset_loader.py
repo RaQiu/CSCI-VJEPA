@@ -60,9 +60,15 @@ def read_image(img_path, grey_scale=None ):
     return img
 
 
+def _encode_jepa_paths(paths):
+    if isinstance(paths, (list, tuple)):
+        return "\n".join(paths)
+    return str(paths)
+
+
 class ImageDataset(Dataset):
     """Image Person ReID Dataset"""
-    def __init__(self, dataset, aux_info=False, transform=None, train=None, Debug=None, return_index=None, datatset_name=None, grey_scale=None, **kwargs ):
+    def __init__(self, dataset, aux_info=False, transform=None, train=None, Debug=None, return_index=None, datatset_name=None, grey_scale=None, return_jepa_paths=None, **kwargs ):
         self.dataset = dataset
         self.transform = transform
         self.aux_info = aux_info
@@ -71,6 +77,7 @@ class ImageDataset(Dataset):
         self.return_index = return_index
         self.datatset_name = datatset_name
         self.grey_scale = grey_scale
+        self.return_jepa_paths = return_jepa_paths
         if self.dataset and len(self.dataset):self.__getitem__(0)
         
 
@@ -86,11 +93,19 @@ class ImageDataset(Dataset):
         if type(aux_info) is np.ndarray:
             select_index = np.random.randint(aux_info.shape[0])
             if self.return_index:
+                if self.return_jepa_paths:
+                    return img, pid,camid, clothes_id,cloth_id_batch, aux_info[select_index,:], index, _encode_jepa_paths(img_path)
                 return img, pid,camid, clothes_id,cloth_id_batch, aux_info[select_index,:], index
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, aux_info[select_index,:], _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, aux_info[select_index,:]
         else:
             if self.return_index:
+                if self.return_jepa_paths:
+                    return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index, _encode_jepa_paths(img_path)
                 return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
         
         
@@ -102,6 +117,8 @@ class Video_as_Image(ImageDataset):
         img = read_image(img_path)
         img = self.transform(img)
         cloth_id_batch = torch.tensor(clothes_id, dtype=torch.int64) 
+        if self.return_jepa_paths:
+            return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
         return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
 
     def test_loader(self, index):
@@ -113,7 +130,11 @@ class Video_as_Image(ImageDataset):
         # save_image (img , "temp.png")
         cloth_id_batch = torch.tensor(clothes_id, dtype=torch.int64) 
         if self.return_index:
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index, _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index
+        if self.return_jepa_paths:
+            return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
         return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
 
     def __getitem__(self, index):
@@ -292,7 +313,11 @@ class Video_as_Image_fixes(Video_as_Image):
 
         cloth_id_batch = torch.tensor(clothes_id, dtype=torch.int64)
         if self.return_colors :
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), extra_data, _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), extra_data    
+        if self.return_jepa_paths:
+            return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
         return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
 
 class ImageDataset_fixes(Video_as_Image_fixes):
@@ -303,7 +328,11 @@ class ImageDataset_fixes(Video_as_Image_fixes):
         
         cloth_id_batch = torch.tensor(clothes_id, dtype=torch.int64)
         if self.return_colors :
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), extra_data, _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), extra_data    
+        if self.return_jepa_paths:
+            return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
         return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
 
     def test_loader(self, index):
@@ -312,7 +341,11 @@ class ImageDataset_fixes(Video_as_Image_fixes):
         img = self.transform(img)
         cloth_id_batch = torch.tensor(clothes_id, dtype=torch.int64) 
         if self.return_index:
+            if self.return_jepa_paths:
+                return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index, _encode_jepa_paths(img_path)
             return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), index
+        if self.return_jepa_paths:
+            return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64), _encode_jepa_paths(img_path)
         return img, pid,camid, clothes_id,cloth_id_batch, np.asarray(aux_info).astype(np.float64)
 
 

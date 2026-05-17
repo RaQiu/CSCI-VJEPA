@@ -6,10 +6,13 @@ This repository keeps two comparable CSCI-V + V-JEPA code paths.
 
 The repository root contains the current local method:
 
-- V-JEPA tokens: 392 dense tokens per 4-frame clip.
+- Stage1 image V-JEPA tokens: 196 dense tokens per single image.
+- Stage1 image fusion input: 1 ReID token + 256 CSCI-V RGB patch tokens + 196 V-JEPA tokens.
+- Stage1 image fusion length: 453 tokens.
+- Stage2 video V-JEPA tokens: 392 dense tokens per 4-frame clip.
 - Adapter: projects V-JEPA token width from 1664 to 1024.
-- Fusion input: 1 tracklet token + 4 frame tokens + 1024 CSCI-V RGB patch tokens + 392 V-JEPA tokens.
-- Total fusion length: 1421 tokens.
+- Stage2 video fusion input: 1 tracklet token + 4 frame tokens + 1024 CSCI-V RGB patch tokens + 392 V-JEPA tokens.
+- Stage2 video fusion length: 1421 tokens.
 - Main config: `configs/mevid_eva02_l_cloth_jepa.yml`.
 
 This version is intended for the next MEVID comparison run.

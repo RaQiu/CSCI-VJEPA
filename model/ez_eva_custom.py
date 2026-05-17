@@ -396,8 +396,9 @@ class EZ_Eva_Hybrid(EZ_Eva):
         num_patches = self.patch_embed.num_patches
         self.cls_token_img = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
         trunc_normal_(self.cls_token_img, std=.02)
-        if config.TRAIN.TEACH1_NUMCLASSES:
-            self.head_image = nn.Linear(embed_dim, config.TRAIN.TEACH1_NUMCLASSES) 
+        image_num_classes = config.TRAIN.TEACH1_NUMCLASSES or kwargs.get("num_classes")
+        if image_num_classes:
+            self.head_image = nn.Linear(embed_dim, image_num_classes) 
         else:
             self.head_image = nn.Identity() 
 
@@ -469,9 +470,11 @@ class EZ_Eva_Hybrid(EZ_Eva):
         x = self.head_drop(x)
         return x if pre_logits else self.head(x)
 
-    def image_forward(self, x,cloth_id):
+    def image_forward(self, x,cloth_id,jepa_tokens=None):
         x = self.image_forward_features(x,cloth_id)
         feat = self.forward_image_head(x, pre_logits=True)
+        rgb_patch_tokens = x[:, self.num_prefix_tokens:]
+        feat = self.jepa_fusion(feat, None, rgb_patch_tokens, jepa_tokens) if self.jepa_fusion is not None else feat
         if not self.training:
             return feat
         else:
@@ -479,8 +482,8 @@ class EZ_Eva_Hybrid(EZ_Eva):
             return cls_score, feat
     
     def forward(self, x,cloth_id,jepa_tokens=None):
-        if self.student_mode:
-            return self.image_forward(x,cloth_id)
+        if self.student_mode or x.dim() == 4:
+            return self.image_forward(x,cloth_id,jepa_tokens=jepa_tokens)
         else:
             return self.video_forward(x,cloth_id,jepa_tokens=jepa_tokens)
 
@@ -538,11 +541,13 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         x = self.head_drop(x)
         return x if pre_logits else self.head(x)
 
-    def image_forward(self, x,cloth_id):
+    def image_forward(self, x,cloth_id,jepa_tokens=None):
         x, distentangle_loss = self.image_forward_features(x,cloth_id)
         extra_token_feats = x[:,0]
         default = x[:,1:]
         feat = self.forward_image_head(default, pre_logits=True)
+        rgb_patch_tokens = default[:, self.num_prefix_tokens:]
+        feat = self.jepa_fusion(feat, None, rgb_patch_tokens, jepa_tokens) if self.jepa_fusion is not None else feat
         if not self.training:
             return feat
         else:

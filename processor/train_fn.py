@@ -72,25 +72,47 @@ def setup_grad_cam (model , use_wrapper=None, n_head_tokens=2, chosen_index=-1, 
 
 def default_img_loader_w_aux(cfg, data, ):
     text = None
-    samples, targets, camids, _, clothes, meta, aux_info = data
+    jepa_paths = None
+    if cfg.MODEL.JEPA_ENABLE and len(data) == 8:
+        samples, targets, camids, _, clothes, meta, aux_info, jepa_paths = data
+    else:
+        samples, targets, camids, _, clothes, meta, aux_info = data
     meta = None
     samples = samples.cuda(non_blocking=True)
     targets = targets.cuda(non_blocking=True)
     clothes = clothes.cuda(non_blocking=True)
     aux_info = aux_info.cuda(non_blocking=True)
     
-    return samples, targets, clothes, meta, camids, text, aux_info
+    return samples, targets, clothes, meta, camids, jepa_paths, aux_info
 
 # from train import default_img_loader
 def default_img_loader_wo_aux(cfg, data, ):
     text = None
-    samples, targets, camids, _, clothes, meta = data
+    jepa_paths = None
+    if cfg.MODEL.JEPA_ENABLE and len(data) == 7:
+        samples, targets, camids, _, clothes, meta, jepa_paths = data
+    else:
+        samples, targets, camids, _, clothes, meta = data
     meta = None
     samples = samples.cuda(non_blocking=True)
     targets = targets.cuda(non_blocking=True)
     clothes = clothes.cuda(non_blocking=True)
     
-    return samples, targets, clothes, meta, camids, text
+    return samples, targets, clothes, meta, camids, jepa_paths
+
+
+def maybe_load_jepa_tokens_for_step(cfg, jepa_paths, device, training_mode):
+    if not cfg.MODEL.JEPA_ENABLE:
+        return None
+    if training_mode not in ("image", "video"):
+        return None
+    if jepa_paths is None:
+        raise RuntimeError("MODEL.JEPA_ENABLE is True, but the dataloader did not return JEPA frame paths.")
+    from tools.jepa_lazy_cache import load_jepa_batch
+    write_cache = cfg.MODEL.JEPA_WRITE_TRAIN_CACHE
+    if training_mode == "image":
+        write_cache = cfg.MODEL.JEPA_WRITE_IMAGE_CACHE
+    return load_jepa_batch(cfg, jepa_paths, device, write_cache=write_cache)
 
 
 def cuda_eucledian_dist(x, y):
@@ -121,14 +143,15 @@ def train_step_pair(cfg, model, train_loader, optimizer, optimizer_center, loss_
     model.train()
     for idx, data in enumerate(train_loader):
 
-        samples, targets, clothes, _, camids, _ = DEFAULT_LOADER(cfg, data, )
+        samples, targets, clothes, _, camids, jepa_paths = DEFAULT_LOADER(cfg, data, )
+        jepa_tokens = maybe_load_jepa_tokens_for_step(cfg, jepa_paths, samples.device, training_mode)
         samples, targets, clothes, camids, B, N_replicas = handle_replica_data(samples, targets, clothes, camids, )
         # save_image(normalize(samples), "t1.png" )   
 
         optimizer.zero_grad()
         optimizer_center.zero_grad()
         with amp.autocast(enabled=True):
-            score, feat = model(samples, clothes)
+            score, feat = model(samples, clothes, jepa_tokens=jepa_tokens)
         loss = loss_fn(score, feat, targets, camids, training_mode=training_mode)
 
         # samples = reverse_arrange(samples, B , N_replicas)
@@ -371,12 +394,13 @@ def train_w_color_labels(cfg, model, train_loader, optimizer, optimizer_center, 
 
     for idx, data in enumerate(train_loader):
 
-        samples, targets, clothes, meta, camids, text, color_label= DEFAULT_LOADER(cfg, data, )
+        samples, targets, clothes, meta, camids, jepa_paths, color_label= DEFAULT_LOADER(cfg, data, )
+        jepa_tokens = maybe_load_jepa_tokens_for_step(cfg, jepa_paths, samples.device, training_mode)
         
         optimizer.zero_grad()
         optimizer_center.zero_grad()
         with amp.autocast(enabled=True):
-            score, feat, color_output, color_feats, dist_loss = model(samples, clothes)
+            score, feat, color_output, color_feats, dist_loss = model(samples, clothes, jepa_tokens=jepa_tokens)
             # save_image(samples, "test.png")
             color_loss = color_loss_fn(color_output.float(), color_label.squeeze()).mean()
 
@@ -402,7 +426,8 @@ def train_w_color_labels_feed(cfg, model, train_loader, optimizer, optimizer_cen
 
     for idx, data in enumerate(train_loader):
 
-        samples, targets, clothes, meta, camids, text, color_label= DEFAULT_LOADER(cfg, data, )
+        samples, targets, clothes, meta, camids, jepa_paths, color_label= DEFAULT_LOADER(cfg, data, )
+        jepa_tokens = maybe_load_jepa_tokens_for_step(cfg, jepa_paths, samples.device, training_mode)
         
         optimizer.zero_grad()
         optimizer_center.zero_grad()
@@ -432,12 +457,13 @@ def train_w_cl_dist(cfg, model, train_loader, optimizer, optimizer_center, loss_
     for idx, data in enumerate(train_loader):
 
         # data[0], data[1], data[2], data[3], data[4], data[5] 
-        samples, targets, clothes, meta, camids, text= DEFAULT_LOADER(cfg, data, )
+        samples, targets, clothes, meta, camids, jepa_paths= DEFAULT_LOADER(cfg, data, )
+        jepa_tokens = maybe_load_jepa_tokens_for_step(cfg, jepa_paths, samples.device, training_mode)
         
         optimizer.zero_grad()
         optimizer_center.zero_grad()
         with amp.autocast(enabled=True):
-            score, feat, color_output, color_feats, dist_loss = model(samples, clothes)
+            score, feat, color_output, color_feats, dist_loss = model(samples, clothes, jepa_tokens=jepa_tokens)
             # save_image(samples, "test.png")
             clothes_loss = color_loss_fn(color_output, clothes).mean()
 
@@ -462,7 +488,8 @@ def train_w_color_direct(cfg, model, train_loader, optimizer, optimizer_center, 
     N = len(train_loader)
 
     for idx, data in enumerate(train_loader):
-        samples, targets, clothes, meta, camids, text, color_label= DEFAULT_LOADER(cfg, data, )
+        samples, targets, clothes, meta, camids, jepa_paths, color_label= DEFAULT_LOADER(cfg, data, )
+        jepa_tokens = maybe_load_jepa_tokens_for_step(cfg, jepa_paths, samples.device, training_mode)
         
         optimizer.zero_grad()
         optimizer_center.zero_grad()
@@ -481,5 +508,3 @@ def train_w_color_direct(cfg, model, train_loader, optimizer, optimizer_center, 
                         .format(epoch, (idx + 1), len(train_loader),
                                 loss_meter.avg, dist_loss.mean().item(),  acc_meter.avg, scheduler._get_lr(epoch)[0]))
     return idx 
-
-
