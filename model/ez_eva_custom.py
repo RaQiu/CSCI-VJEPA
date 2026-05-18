@@ -1,5 +1,6 @@
 import torch 
 import torch.nn as nn
+from timm.layers import RotaryEmbeddingCat
 
 from  model.eva_cloth_embed import Eva as Eva_Image
 from  model.ez_eval_cloth_vid import EZ_Eva, build_model_with_cfg, register_model, \
@@ -25,10 +26,9 @@ model_args = dict(
     )
 
 
-class JepaFeatureFusion(nn.Module):
-    def __init__(self, embed_dim=1024, jepa_dim=1664, hidden_dim=4096, context_tokens=4, num_heads=8, num_layers=1, dropout=0.1):
+class JepaTokenAdapter(nn.Module):
+    def __init__(self, embed_dim=1024, jepa_dim=1664, hidden_dim=4096, dropout=0.1):
         super().__init__()
-        # context_tokens is kept for old configs; dense_patch fusion keeps all JEPA tokens.
         self.adapter = nn.Sequential(
             nn.LayerNorm(jepa_dim),
             nn.Linear(jepa_dim, hidden_dim),
@@ -37,30 +37,10 @@ class JepaFeatureFusion(nn.Module):
             nn.Linear(hidden_dim, embed_dim),
             nn.LayerNorm(embed_dim),
         )
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.fusion = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.out_norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, tracklet_feat, frame_feats, rgb_patch_tokens, jepa_tokens):
-        if jepa_tokens is None:
-            return tracklet_feat
-        jepa_tokens = jepa_tokens.detach().to(device=tracklet_feat.device, dtype=tracklet_feat.dtype)
-        jepa_tokens = self.adapter(jepa_tokens)
-        tokens = [tracklet_feat.unsqueeze(1)]
-        if frame_feats is not None:
-            tokens.append(frame_feats.to(device=tracklet_feat.device, dtype=tracklet_feat.dtype))
-        if rgb_patch_tokens is not None:
-            tokens.append(rgb_patch_tokens.to(device=tracklet_feat.device, dtype=tracklet_feat.dtype))
-        tokens.append(jepa_tokens)
-        return self.out_norm(self.fusion(torch.cat(tokens, dim=1))[:, 0])
+    def forward(self, jepa_tokens, like):
+        jepa_tokens = jepa_tokens.detach().to(device=like.device, dtype=like.dtype)
+        return self.adapter(jepa_tokens)
 
 
 class EZ_Eva_T1(EZ_Eva):
@@ -404,36 +384,96 @@ class EZ_Eva_Hybrid(EZ_Eva):
             self.head_image.weight.data.mul_(head_init_scale)
             self.head_image.bias.data.mul_(head_init_scale)
 
-        self.jepa_fusion = None
+        self.jepa_adapter = None
+        self.jepa_rope = None
+        self.jepa_grid_h = 14
+        self.jepa_grid_w = 14
         if config is not None and getattr(config.MODEL, "JEPA_ENABLE", False):
-            if getattr(config.MODEL, "JEPA_FUSION_MODE", "dense_patch") != "dense_patch":
-                raise ValueError("Only MODEL.JEPA_FUSION_MODE='dense_patch' is supported in the 1421-token JEPA path.")
-            self.jepa_fusion = JepaFeatureFusion(
+            if getattr(config.MODEL, "JEPA_INJECT_MODE", "token_rope") != "token_rope":
+                raise ValueError("Only MODEL.JEPA_INJECT_MODE='token_rope' is supported.")
+            self.jepa_adapter = JepaTokenAdapter(
                 embed_dim=embed_dim,
                 jepa_dim=config.MODEL.JEPA_IN_DIM,
                 hidden_dim=config.MODEL.JEPA_ADAPTER_HIDDEN,
-                context_tokens=config.MODEL.JEPA_CONTEXT_TOKENS,
-                num_heads=config.MODEL.JEPA_FUSION_HEADS,
-                num_layers=config.MODEL.JEPA_FUSION_LAYERS,
             )
+            self.jepa_grid_h = int(config.DATA.IMG_HEIGHT) // 16
+            self.jepa_grid_w = int(config.DATA.IMG_WIDTH) // 16
+            num_heads = self.blocks[0].attn.num_heads
+            self.jepa_rope = RotaryEmbeddingCat(embed_dim // num_heads, in_pixels=False)
+
+    def _jepa_rope_shape(self, num_jepa_tokens):
+        spatial_tokens = self.jepa_grid_h * self.jepa_grid_w
+        if spatial_tokens <= 0 or num_jepa_tokens % spatial_tokens != 0:
+            raise ValueError(
+                f"Unexpected JEPA token count {num_jepa_tokens} for "
+                f"{self.jepa_grid_h}x{self.jepa_grid_w} JEPA grid."
+            )
+        temporal_bins = num_jepa_tokens // spatial_tokens
+        return (temporal_bins * self.jepa_grid_h, self.jepa_grid_w)
+
+    def _append_jepa_tokens(self, x, rot_pos_embed, jepa_tokens, repeat_t=None):
+        if self.jepa_adapter is None or jepa_tokens is None:
+            return x, rot_pos_embed
+
+        num_jepa_tokens = jepa_tokens.shape[1]
+        jepa_tokens = self.jepa_adapter(jepa_tokens, x)
+        if repeat_t is not None:
+            jepa_tokens = repeat(jepa_tokens, "B J C -> (B T) J C", T=repeat_t)
+
+        if rot_pos_embed is not None:
+            jepa_rot_pos_embed = self.jepa_rope.get_embed(self._jepa_rope_shape(num_jepa_tokens))
+            jepa_rot_pos_embed = jepa_rot_pos_embed.to(device=rot_pos_embed.device, dtype=rot_pos_embed.dtype)
+            rot_pos_embed = torch.cat([rot_pos_embed, jepa_rot_pos_embed], dim=0)
+
+        x = torch.cat([x, jepa_tokens], dim=1)
+        return x, rot_pos_embed
 
     def video_forward(self, x,cloth_id,jepa_tokens=None):
-        x, B, T = self.forward_features(x,cloth_id)
-        # Dense fusion uses the CSCI-V RGB patch tokens plus the V-JEPA latent tokens.
-        if self.joint:
-            rgb_patch_tokens = x[:, 1:]
-        else:
-            rgb_patch_tokens = x[:, self.num_prefix_tokens:]
-            rgb_patch_tokens = rearrange(rgb_patch_tokens, "(B T) N C -> B (T N) C", B=B, T=T)
+        x, B, T = self.forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
         feat, feat_h = self.forward_head(x, B, T, pre_logits=True)
-        feat_h = self.jepa_fusion(feat_h, feat, rgb_patch_tokens, jepa_tokens) if self.jepa_fusion is not None else feat_h
         if not self.training:
             return feat_h
         else:
             cls_score = self.head(feat_h)
             return cls_score, [feat_h, feat]
 
-    def image_forward_features(self, x,cloth_id):
+    def forward_features(self, x,cloth_id,jepa_tokens=None):
+        B,C,T,H,W = x.shape
+
+        x = rearrange(x ," B C T H W -> (B T) C H W")
+        x = self.patch_embed(x)
+
+        if self.cls_token is not None:
+            x = torch.cat((self.cls_token.expand(B * T, -1, -1), x), dim=1)
+
+        if self.pos_embed is not None:
+            x = x + self.pos_embed
+
+        N = x.shape[1]
+        x = rearrange(x ,"(B T) N C -> (B N) T C", T=T, N=N)
+        x = x + self.temporal_tokens.to(x.dtype)
+        x = rearrange(x, '(B N) T C -> (B T) N C', N=N)
+
+        if self.joint:
+            raise NotImplementedError("JEPA token injection currently supports the default non-joint CSCI-V video path.")
+
+        x = self.pos_drop(x)
+
+        rot_pos_embed = self.rope.get_embed() if self.rope is not None else None
+        if self.patch_drop is not None:
+            x, keep_indices = self.patch_drop(x)
+            if rot_pos_embed is not None and keep_indices is not None:
+                rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
+
+        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens, repeat_t=T)
+
+        for blk in self.blocks:
+            x = blk(x, rope=rot_pos_embed)
+
+        x = self.norm(x)
+        return x, B,T
+
+    def image_forward_features(self, x,cloth_id,jepa_tokens=None):
         x = self.patch_embed(x)
 
         if self.cls_token_img is not None:
@@ -453,6 +493,8 @@ class EZ_Eva_Hybrid(EZ_Eva):
             if rot_pos_embed is not None and keep_indices is not None:
                 rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
 
+        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
+
         for blk in self.blocks:
             x = blk(x, rope=rot_pos_embed, image_mode=True)
 
@@ -467,10 +509,8 @@ class EZ_Eva_Hybrid(EZ_Eva):
         return x if pre_logits else self.head(x)
 
     def image_forward(self, x,cloth_id,jepa_tokens=None):
-        x = self.image_forward_features(x,cloth_id)
+        x = self.image_forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
         feat = self.forward_image_head(x, pre_logits=True)
-        rgb_patch_tokens = x[:, self.num_prefix_tokens:]
-        feat = self.jepa_fusion(feat, None, rgb_patch_tokens, jepa_tokens) if self.jepa_fusion is not None else feat
         if not self.training:
             return feat
         else:
@@ -501,7 +541,7 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         self.extra_pos_in_temporal = nn.Parameter(torch.zeros(1, 1, embed_dim))
         trunc_normal_(self.extra_pos_in_temporal, std=.02)
 
-    def image_forward_features(self, x,cloth_id):
+    def image_forward_features(self, x,cloth_id,jepa_tokens=None):
         distentangle_loss = 0 
         x = self.patch_embed(x)
         
@@ -519,6 +559,8 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
             x, keep_indices = self.patch_drop(x)
             if rot_pos_embed is not None and keep_indices is not None:
                 rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
+
+        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
 
         for blk in self.blocks:
             x = blk(x, rope=rot_pos_embed, image_mode=True)
@@ -538,12 +580,10 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         return x if pre_logits else self.head(x)
 
     def image_forward(self, x,cloth_id,jepa_tokens=None):
-        x, distentangle_loss = self.image_forward_features(x,cloth_id)
+        x, distentangle_loss = self.image_forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
         extra_token_feats = x[:,0]
         default = x[:,1:]
         feat = self.forward_image_head(default, pre_logits=True)
-        rgb_patch_tokens = default[:, self.num_prefix_tokens:]
-        feat = self.jepa_fusion(feat, None, rgb_patch_tokens, jepa_tokens) if self.jepa_fusion is not None else feat
         if not self.training:
             return feat
         else:
