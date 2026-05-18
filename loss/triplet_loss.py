@@ -72,34 +72,25 @@ def hard_example_mining(dist_mat, labels, return_inds=False):
     # shape [N, N]
     is_pos = labels.expand(N, N).eq(labels.expand(N, N).t())
     is_neg = labels.expand(N, N).ne(labels.expand(N, N).t())
+    valid = is_pos.any(dim=1) & is_neg.any(dim=1)
 
-    # `dist_ap` means distance(anchor, positive)
-    # both `dist_ap` and `relative_p_inds` with shape [N, 1]
-    dist_ap, relative_p_inds = torch.max(
-        dist_mat[is_pos].contiguous().view(N, -1), 1, keepdim=True)
-    # print(dist_mat[is_pos].shape)
-    # `dist_an` means distance(anchor, negative)
-    # both `dist_an` and `relative_n_inds` with shape [N, 1]
-    dist_an, relative_n_inds = torch.min(
-        dist_mat[is_neg].contiguous().view(N, -1), 1, keepdim=True)
-    # shape [N]
-    dist_ap = dist_ap.squeeze(1)
-    dist_an = dist_an.squeeze(1)
+    if not valid.any():
+        empty_dist = dist_mat.new_empty(0)
+        if return_inds:
+            empty_inds = labels.new_empty(0)
+            return empty_dist, empty_dist, empty_inds, empty_inds
+        return empty_dist, empty_dist
+
+    dist_ap_mat = dist_mat.masked_fill(~is_pos, -float("inf"))
+    dist_an_mat = dist_mat.masked_fill(~is_neg, float("inf"))
+
+    dist_ap, p_inds = torch.max(dist_ap_mat, 1)
+    dist_an, n_inds = torch.min(dist_an_mat, 1)
+    dist_ap = dist_ap[valid]
+    dist_an = dist_an[valid]
 
     if return_inds:
-        # shape [N, N]
-        ind = (labels.new().resize_as_(labels)
-               .copy_(torch.arange(0, N).long())
-               .unsqueeze(0).expand(N, N))
-        # shape [N, 1]
-        p_inds = torch.gather(
-            ind[is_pos].contiguous().view(N, -1), 1, relative_p_inds.data)
-        n_inds = torch.gather(
-            ind[is_neg].contiguous().view(N, -1), 1, relative_n_inds.data)
-        # shape [N]
-        p_inds = p_inds.squeeze(1)
-        n_inds = n_inds.squeeze(1)
-        return dist_ap, dist_an, p_inds, n_inds
+        return dist_ap, dist_an, p_inds[valid], n_inds[valid]
 
     return dist_ap, dist_an
 
@@ -123,6 +114,8 @@ class TripletLoss(object):
             global_feat = normalize(global_feat, axis=-1)
         dist_mat = euclidean_dist(global_feat, global_feat)
         dist_ap, dist_an = hard_example_mining(dist_mat, labels)
+        if dist_ap.numel() == 0:
+            return global_feat.sum() * 0.0, dist_ap, dist_an
 
         dist_ap *= (1.0 + self.hard_factor)
         dist_an *= (1.0 - self.hard_factor)
@@ -133,5 +126,4 @@ class TripletLoss(object):
         else:
             loss = self.ranking_loss(dist_an - dist_ap, y)
         return loss, dist_ap, dist_an
-
 
