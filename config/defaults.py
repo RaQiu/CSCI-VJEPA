@@ -89,7 +89,7 @@ _C.MODEL.JEPA_GATE_LOGIT_INIT = -4.59512
 _C.MODEL.JEPA_CACHE_REQUIRED = True
 _C.MODEL.JEPA_RELEASE_ENCODER_AFTER_BATCH = False
 _C.MODEL.JEPA_WRITE_TRAIN_CACHE = False
-_C.MODEL.JEPA_WRITE_IMAGE_CACHE = True
+_C.MODEL.JEPA_WRITE_IMAGE_CACHE = False
 
 # -----------------------------------------------------------------------------
 # Train settings
