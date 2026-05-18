@@ -26,7 +26,7 @@ model_args = dict(
 
 
 class JepaFeatureFusion(nn.Module):
-    def __init__(self, embed_dim=1024, jepa_dim=1664, hidden_dim=4096, context_tokens=4, num_heads=8, num_layers=1, dropout=0.1, gate_logit_init=-4.59512):
+    def __init__(self, embed_dim=1024, jepa_dim=1664, hidden_dim=4096, context_tokens=4, num_heads=8, num_layers=1, dropout=0.1):
         super().__init__()
         # context_tokens is kept for old configs; dense_patch fusion keeps all JEPA tokens.
         self.adapter = nn.Sequential(
@@ -48,7 +48,6 @@ class JepaFeatureFusion(nn.Module):
         )
         self.fusion = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.out_norm = nn.LayerNorm(embed_dim)
-        self.gate_logit = nn.Parameter(torch.tensor(float(gate_logit_init)))
 
     def forward(self, tracklet_feat, frame_feats, rgb_patch_tokens, jepa_tokens):
         if jepa_tokens is None:
@@ -61,9 +60,7 @@ class JepaFeatureFusion(nn.Module):
         if rgb_patch_tokens is not None:
             tokens.append(rgb_patch_tokens.to(device=tracklet_feat.device, dtype=tracklet_feat.dtype))
         tokens.append(jepa_tokens)
-        fused_feat = self.out_norm(self.fusion(torch.cat(tokens, dim=1))[:, 0])
-        gate = torch.sigmoid(self.gate_logit).to(dtype=tracklet_feat.dtype)
-        return tracklet_feat + gate * (fused_feat - tracklet_feat)
+        return self.out_norm(self.fusion(torch.cat(tokens, dim=1))[:, 0])
 
 
 class EZ_Eva_T1(EZ_Eva):
@@ -418,7 +415,6 @@ class EZ_Eva_Hybrid(EZ_Eva):
                 context_tokens=config.MODEL.JEPA_CONTEXT_TOKENS,
                 num_heads=config.MODEL.JEPA_FUSION_HEADS,
                 num_layers=config.MODEL.JEPA_FUSION_LAYERS,
-                gate_logit_init=config.MODEL.JEPA_GATE_LOGIT_INIT,
             )
 
     def video_forward(self, x,cloth_id,jepa_tokens=None):

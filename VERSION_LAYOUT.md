@@ -13,6 +13,7 @@ The repository root contains the current local method:
 - Adapter: projects V-JEPA token width from 1664 to 1024.
 - Stage2 video fusion input: 1 tracklet token + 4 frame tokens + 1024 CSCI-V RGB patch tokens + 392 V-JEPA tokens.
 - Stage2 video fusion length: 1421 tokens.
+- Fusion output: the first token after the fusion transformer is used directly; there is no residual gate.
 - Main config: `configs/mevid_eva02_l_cloth_jepa.yml`.
 
 This version is intended for the next MEVID comparison run.
