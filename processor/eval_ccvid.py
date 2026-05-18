@@ -32,7 +32,8 @@ def extract_vid_feature(model, dataloader, vid2clip_index, data_length, device=N
             jepa_tokens = None
             if cfg.MODEL.JEPA_ENABLE:
                 from tools.jepa_lazy_cache import load_jepa_batch
-                jepa_tokens = load_jepa_batch(cfg, jepa_paths, imgs.device)
+                write_cache = cfg.MODEL.JEPA_WRITE_IMAGE_CACHE if imgs.dim() == 4 else cfg.MODEL.JEPA_WRITE_TRAIN_CACHE
+                jepa_tokens = load_jepa_batch(cfg, jepa_paths, imgs.device, write_cache=write_cache)
             # torch.Size([512, 3, 224, 224])
             # torch.Size([512])
 
@@ -100,7 +101,8 @@ def extract_vid_feature_with_index(model, dataloader, vid2clip_index, data_lengt
             jepa_tokens = None
             if cfg.MODEL.JEPA_ENABLE:
                 from tools.jepa_lazy_cache import load_jepa_batch
-                jepa_tokens = load_jepa_batch(cfg, jepa_paths, imgs.device)
+                write_cache = cfg.MODEL.JEPA_WRITE_IMAGE_CACHE if imgs.dim() == 4 else cfg.MODEL.JEPA_WRITE_TRAIN_CACHE
+                jepa_tokens = load_jepa_batch(cfg, jepa_paths, imgs.device, write_cache=write_cache)
             # torch.Size([512, 3, 224, 224])
             # torch.Size([512])
 
