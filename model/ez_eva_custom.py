@@ -1,5 +1,6 @@
-import torch 
+import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from timm.layers import RotaryEmbeddingCat
 
 from  model.eva_cloth_embed import Eva as Eva_Image
@@ -400,6 +401,9 @@ class EZ_Eva_Hybrid(EZ_Eva):
             self.jepa_grid_w = int(config.DATA.IMG_WIDTH) // 16
             num_heads = self.blocks[0].attn.num_heads
             self.jepa_rope = RotaryEmbeddingCat(embed_dim // num_heads, in_pixels=False)
+            # JEPA injection nearly triples the attention sequence length; switch on
+            # activation checkpointing here because no caller invokes set_grad_checkpointing.
+            self.grad_checkpointing = True
 
     def _jepa_rope_shape(self, num_jepa_tokens):
         spatial_tokens = self.jepa_grid_h * self.jepa_grid_w
@@ -468,7 +472,10 @@ class EZ_Eva_Hybrid(EZ_Eva):
         x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens, repeat_t=T)
 
         for blk in self.blocks:
-            x = blk(x, rope=rot_pos_embed)
+            if self.grad_checkpointing and not torch.jit.is_scripting():
+                x = checkpoint(blk, x, rope=rot_pos_embed)
+            else:
+                x = blk(x, rope=rot_pos_embed)
 
         x = self.norm(x)
         return x, B,T
@@ -496,7 +503,10 @@ class EZ_Eva_Hybrid(EZ_Eva):
         x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
 
         for blk in self.blocks:
-            x = blk(x, rope=rot_pos_embed, image_mode=True)
+            if self.grad_checkpointing and not torch.jit.is_scripting():
+                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True)
+            else:
+                x = blk(x, rope=rot_pos_embed, image_mode=True)
 
         x = self.norm(x)
         return x
@@ -563,7 +573,10 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
 
         for blk in self.blocks:
-            x = blk(x, rope=rot_pos_embed, image_mode=True)
+            if self.grad_checkpointing and not torch.jit.is_scripting():
+                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True)
+            else:
+                x = blk(x, rope=rot_pos_embed, image_mode=True)
             if self.layer_disentangle:
                 extra_token = x[:,0]
                 class_token = x[:,1]

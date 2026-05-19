@@ -582,7 +582,14 @@ def test_mevid(config, model, queryloader, galleryloader, dataset, device, dump_
         if local_rank == 0:
             logger.info("Skipping location/scale MEVID subsets because test_track_scale.txt is missing")
 
-    cmc_acc = dict(cmc_diff_scale=cmc_diff_scale[0], cmc_diff_loc=cmc_diff_loc[0], cmc_cc=cmc_cc[0], cmc_overall=cmc_overall[0], cmc=cmc_overall[0])
+    cmc_acc = dict(
+        cmc_diff_scale=cmc_diff_scale[0],
+        cmc_diff_loc=cmc_diff_loc[0],
+        cmc_cc=cmc_cc[0],
+        cmc_overall=cmc_overall[0],
+        cmc=cmc_overall[0],
+        __cmc_overall=cmc_overall,
+    )
     map_acc = dict(mAP_diff_scale=mAP_diff_scale, mAP_diff_loc=mAP_diff_loc, mAP_cc=mAP_cc, mAP_overall=mAP_overall, map=mAP_overall)
 
     if local_rank == 0:  

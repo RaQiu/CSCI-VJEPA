@@ -17,6 +17,32 @@ import pickle
 import sys 
 from torchvision.utils import save_image 
 
+def visible_metric_items(metric_dict):
+    return [(key, value) for key, value in metric_dict.items() if not str(key).startswith("__")]
+
+
+def save_stage2_metric_bests(cfg, model, epoch, logger, rank1, mAP, cmc_overall, best_rank1_dict):
+    if not cfg.TRAIN.TRAIN_VIDEO or not cfg.MODEL.DIST_TRAIN or dist.get_rank() != 0:
+        return
+
+    metrics = {
+        "r1": float(rank1),
+        "map": float(mAP),
+    }
+    overall_cmc = cmc_overall.get("__cmc_overall") if isinstance(cmc_overall, dict) else None
+    if overall_cmc is not None and len(overall_cmc) >= 10:
+        metrics["r5"] = float(overall_cmc[4])
+        metrics["r10"] = float(overall_cmc[9])
+
+    for name, value in metrics.items():
+        best_key = f"__stage2_best_{name}"
+        if value > best_rank1_dict[best_key]:
+            best_rank1_dict[best_key] = value
+            path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + f"_best_{name}.pth")
+            logger.info(f"Saving stage2 best {name.upper()} checkpoint at epoch {epoch}: {value:.4f}")
+            torch.save(model.state_dict(), path)
+
+
 def default_img_loader(cfg, data, ):
     text = None
     jepa_paths = None
@@ -203,8 +229,8 @@ def eval_step(cfg, model, val_loader, evaluator_diff, evaluator_same, val_loader
     best_epoch = 0 
 
     if 'mevid' in cfg.DATA.DATASET :
-        for key in cmc_overall:best_rank1_dict[key]= max(best_rank1_dict[key], cmc_overall[key])
-        for key in mAP_overall:best_map_dict[key] = max(mAP_overall[key], best_map_dict[key])
+        for key, value in visible_metric_items(cmc_overall): best_rank1_dict[key]= max(best_rank1_dict[key], value)
+        for key, value in visible_metric_items(mAP_overall): best_map_dict[key] = max(value, best_map_dict[key])
         
         rank1 = torch.tensor(rank1).cuda()
         dist.barrier()
@@ -222,6 +248,7 @@ def eval_step(cfg, model, val_loader, evaluator_diff, evaluator_same, val_loader
 
     is_best = rank1 > best_rank1
     best_map = max(best_map, mAP)
+    save_stage2_metric_bests(cfg, model, epoch, logger, rank1, mAP, cmc_overall, best_rank1_dict)
     
     if is_best:
         best_rank1 = rank1
@@ -230,7 +257,7 @@ def eval_step(cfg, model, val_loader, evaluator_diff, evaluator_same, val_loader
             logger.info("==> Best Rank-1 {:.1%}, Best Map {:.1%} achieved at epoch {}".format(best_rank1, best_map, best_epoch))
             if 'mevid' in cfg.DATA.DATASET :
                 st = "\n"
-                for k1, k2 in zip(best_rank1_dict, best_map_dict): st += f" {k1} : {best_rank1_dict[k1]:.1%} & {k2} : {best_map_dict[k2]:.1%} \n"
+                for (k1, v1), (k2, v2) in zip(visible_metric_items(best_rank1_dict), visible_metric_items(best_map_dict)): st += f" {k1} : {v1:.1%} & {k2} : {v2:.1%} \n"
                 logger.info(f"==> {st}")
         if cfg.MODEL.DIST_TRAIN:
             if dist.get_rank() == 0:
@@ -339,7 +366,7 @@ def do_train(cfg,
     logger.info("==> Best Rank-1 {:.1%}, Best Map {:.1%} achieved at epoch {}".format(best_rank1, best_map, best_epoch))
     if 'mevid' in cfg.DATA.DATASET :
         st = "\n"
-        for k1, k2 in zip(best_rank1_dict, best_map_dict): st += f" {k1} : {best_rank1_dict[k1]:.1%} & {k2} : {best_map_dict[k2]:.1%} \n"
+        for (k1, v1), (k2, v2) in zip(visible_metric_items(best_rank1_dict), visible_metric_items(best_map_dict)): st += f" {k1} : {v1:.1%} & {k2} : {v2:.1%} \n"
         logger.info(f"==> {st}")
 
     if dist.get_rank() == 0:
@@ -425,7 +452,7 @@ def do_train_w_teachers(cfg,
     logger.info("==> Best Rank-1 {:.1%}, Best Map {:.1%} achieved at epoch {}".format(best_rank1, best_map, best_epoch))
     if 'mevid' in cfg.DATA.DATASET :
         st = "\n"
-        for k1, k2 in zip(best_rank1_dict, best_map_dict): st += f" {k1} : {best_rank1_dict[k1]:.1%} & {k2} : {best_map_dict[k2]:.1%} \n"
+        for (k1, v1), (k2, v2) in zip(visible_metric_items(best_rank1_dict), visible_metric_items(best_map_dict)): st += f" {k1} : {v1:.1%} & {k2} : {v2:.1%} \n"
         logger.info(f"==> {st}")
                 
     if dist.get_rank() == 0:
