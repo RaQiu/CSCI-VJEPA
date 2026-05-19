@@ -26,7 +26,6 @@ def save_stage2_metric_bests(cfg, model, epoch, logger, rank1, mAP, cmc_overall,
         return
 
     metrics = {
-        "r1": float(rank1),
         "map": float(mAP),
     }
     overall_cmc = cmc_overall.get("__cmc_overall") if isinstance(cmc_overall, dict) else None
