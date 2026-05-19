@@ -473,7 +473,7 @@ class EZ_Eva_Hybrid(EZ_Eva):
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
-                x = checkpoint(blk, x, rope=rot_pos_embed)
+                x = checkpoint(blk, x, rope=rot_pos_embed, use_reentrant=False)
             else:
                 x = blk(x, rope=rot_pos_embed)
 
@@ -504,7 +504,7 @@ class EZ_Eva_Hybrid(EZ_Eva):
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
-                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True)
+                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True, use_reentrant=False)
             else:
                 x = blk(x, rope=rot_pos_embed, image_mode=True)
 
@@ -574,7 +574,7 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
-                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True)
+                x = checkpoint(blk, x, rope=rot_pos_embed, image_mode=True, use_reentrant=False)
             else:
                 x = blk(x, rope=rot_pos_embed, image_mode=True)
             if self.layer_disentangle:
