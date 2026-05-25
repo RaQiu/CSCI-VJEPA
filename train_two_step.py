@@ -4,10 +4,68 @@ import os
 os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO" 
 
 from train import set_seed, set_up_params, set_up_dist, setup_logging, setup_model, modify_params, add_additional_attributes, vid_set
-from processor.train_fn import * 
-from processor import * 
-from loss.custom_loss import * 
+from processor.train_fn import *
+from processor import *
+from loss.custom_loss import *
 import torch
+import types
+from solver import make_optimizer
+from solver.scheduler_factory import create_scheduler
+
+
+def _freeze_backbone_keep_jepa(cfg, model, center_criterion, logger):
+    """
+    冻结 CSCI-V 主干,只让 JEPA 旁路 (+ 可选 head/classifier) 可训。
+    在 setup_model 之后、DDP wrap 之前调用。返回新的 optimizer / optimizer_center / scheduler。
+    """
+    keep_head = cfg.MODEL.JEPA_FREEZE_KEEP_HEAD
+    trainable_prefixes = ('jepa_side.', 'jepa_id_refine.')
+    if keep_head:
+        # head: 视频分类头 (cls_score = self.head(feat_h)), 必须可训以适应 JEPA residual
+        # head_image: 图像分类头 (image_forward 用), stage2 student 阶段也走
+        # bottleneck / classifier / fc_norm: 兜底,EZ_Eva 家族常见命名
+        trainable_prefixes = trainable_prefixes + (
+            'head.', 'head_image.', 'bottleneck.', 'classifier.', 'fc_norm.',
+        )
+
+    n_total, n_trainable, n_frozen = 0, 0, 0
+    trainable_top = set()
+    for name, p in model.named_parameters():
+        n_total += p.numel()
+        if any(name.startswith(pref) for pref in trainable_prefixes):
+            p.requires_grad = True
+            n_trainable += p.numel()
+            trainable_top.add(name.split('.', 1)[0])
+        else:
+            p.requires_grad = False
+            n_frozen += p.numel()
+
+    # 让冻结子模块保持 eval (关 dropout、BN running stats),即使 epoch 开头调用 model.train()
+    frozen_modules = [
+        m for m_name, m in model.named_children()
+        if m_name not in trainable_top
+    ]
+    orig_train = model.train
+
+    def _train_keep_frozen_eval(self, mode=True):
+        orig_train(mode)
+        for m in frozen_modules:
+            m.eval()
+        return self
+    model.train = types.MethodType(_train_keep_frozen_eval, model)
+    model.train(True)
+
+    if logger is not None:
+        logger.info(
+            f"[JEPA_FREEZE_BACKBONE] trainable={n_trainable:,} / total={n_total:,} "
+            f"({100.0*n_trainable/max(1,n_total):.2f}%), frozen={n_frozen:,}"
+        )
+        logger.info(f"[JEPA_FREEZE_BACKBONE] trainable top-level modules: {sorted(trainable_top)}")
+
+    # 重建 optimizer / scheduler — make_optimizer 会自动跳过 requires_grad=False
+    optimizer, optimizer_center = make_optimizer(cfg, model, center_criterion)
+    scheduler = create_scheduler(cfg, optimizer)
+    return optimizer, optimizer_center, scheduler
 
 def add_external_training_fns(kwargs_external, kwargs_internal):
     kwargs = {}
@@ -113,6 +171,19 @@ if __name__ == '__main__':
 
 
     model, loss_func, center_criterion, optimizer, optimizer_center, scheduler = setup_model(cfg, args, logger, dataset, )
+
+    # 可选: 冻结 CSCI-V 主干, 只训 JEPA 旁路 (+ 可选 head)
+    # 必须在 setup_model 之后 (load_param 已恢复权重) 但 DDP wrap 之前
+    if cfg.MODEL.JEPA_FREEZE_BACKBONE:
+        if model.jepa_side is None:
+            raise RuntimeError(
+                "JEPA_FREEZE_BACKBONE=True 但 model.jepa_side 未构建; "
+                "需要 MODEL.JEPA_SIDE_PATH=True"
+            )
+        optimizer, optimizer_center, scheduler = _freeze_backbone_keep_jepa(
+            cfg, model, center_criterion, logger
+        )
+
     _, kwargs_internal = add_additional_attributes(cfg, args)
     
     kwargs = add_external_training_fns(kwargs_external, kwargs_internal)

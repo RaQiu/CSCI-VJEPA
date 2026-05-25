@@ -80,12 +80,24 @@ _C.MODEL.JEPA_CHECKPOINT_FILE = 'vjepa2_1_vitG_384.pt'
 _C.MODEL.JEPA_DEVICE = 'cuda'
 _C.MODEL.JEPA_DTYPE = 'float16'
 _C.MODEL.JEPA_IN_DIM = 1664
-_C.MODEL.JEPA_INJECT_MODE = 'token_rope'
-_C.MODEL.JEPA_ADAPTER_HIDDEN = 4096
 _C.MODEL.JEPA_CACHE_REQUIRED = True
 _C.MODEL.JEPA_RELEASE_ENCODER_AFTER_BATCH = False
 _C.MODEL.JEPA_WRITE_TRAIN_CACHE = False
 _C.MODEL.JEPA_WRITE_IMAGE_CACHE = False
+
+# JEPA side-path: independent transformer that consumes raw JEPA tokens,
+# carries its own jepa_id_token + jepa_color_token, runs an internal CSCI
+# triple (color MSE + |cos(jepa_id, jepa_color)|), and emits an ID-flavored
+# vector for late fusion with the EVA cls.
+_C.MODEL.JEPA_SIDE_PATH = False
+_C.MODEL.JEPA_SIDE_LAYERS = 4
+_C.MODEL.JEPA_SIDE_NUM_HEADS = 16
+_C.MODEL.JEPA_SIDE_MLP_RATIO = 4.0
+
+# Freeze CSCI-V backbone, train only JEPA side path (+ optionally head/bottleneck).
+# Used in train_two_step.py student stage. Stage1 / teacher 不受影响。
+_C.MODEL.JEPA_FREEZE_BACKBONE = False
+_C.MODEL.JEPA_FREEZE_KEEP_HEAD = True
 
 # -----------------------------------------------------------------------------
 # Train settings

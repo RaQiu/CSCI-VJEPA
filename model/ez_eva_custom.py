@@ -27,23 +27,6 @@ model_args = dict(
     )
 
 
-class JepaTokenAdapter(nn.Module):
-    def __init__(self, embed_dim=1024, jepa_dim=1664, hidden_dim=4096, dropout=0.1):
-        super().__init__()
-        self.adapter = nn.Sequential(
-            nn.LayerNorm(jepa_dim),
-            nn.Linear(jepa_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
-        )
-
-    def forward(self, jepa_tokens, like):
-        jepa_tokens = jepa_tokens.detach().to(device=like.device, dtype=like.dtype)
-        return self.adapter(jepa_tokens)
-
-
 class EZ_Eva_T1(EZ_Eva):
     def __init__(self, config=None, embed_dim=None, **kwargs):
         super().__init__(config=config, embed_dim=embed_dim, **kwargs)
@@ -385,63 +368,64 @@ class EZ_Eva_Hybrid(EZ_Eva):
             self.head_image.weight.data.mul_(head_init_scale)
             self.head_image.bias.data.mul_(head_init_scale)
 
-        self.jepa_adapter = None
-        self.jepa_rope = None
-        self.jepa_grid_h = 14
-        self.jepa_grid_w = 14
+        self.jepa_side = None
+        self.jepa_id_refine = None
         if config is not None and getattr(config.MODEL, "JEPA_ENABLE", False):
-            if getattr(config.MODEL, "JEPA_INJECT_MODE", "token_rope") != "token_rope":
-                raise ValueError("Only MODEL.JEPA_INJECT_MODE='token_rope' is supported.")
-            self.jepa_adapter = JepaTokenAdapter(
-                embed_dim=embed_dim,
+            if not getattr(config.MODEL, "JEPA_SIDE_PATH", False):
+                raise ValueError(
+                    "MODEL.JEPA_ENABLE=True requires MODEL.JEPA_SIDE_PATH=True; "
+                    "the legacy in-EVA injection path has been removed."
+                )
+            from model.jepa_side_path import JepaSidePath
+            self.jepa_side = JepaSidePath(
                 jepa_dim=config.MODEL.JEPA_IN_DIM,
-                hidden_dim=config.MODEL.JEPA_ADAPTER_HIDDEN,
+                out_dim=embed_dim,
+                num_layers=config.MODEL.JEPA_SIDE_LAYERS,
+                num_heads=config.MODEL.JEPA_SIDE_NUM_HEADS,
+                mlp_ratio=config.MODEL.JEPA_SIDE_MLP_RATIO,
+                hist_dim=config.MODEL.EXTRA_DIM,
             )
-            self.jepa_grid_h = int(config.DATA.IMG_HEIGHT) // 16
-            self.jepa_grid_w = int(config.DATA.IMG_WIDTH) // 16
-            num_heads = self.blocks[0].attn.num_heads
-            self.jepa_rope = RotaryEmbeddingCat(embed_dim // num_heads, in_pixels=False)
-            # JEPA injection nearly triples the attention sequence length; switch on
-            # activation checkpointing here because no caller invokes set_grad_checkpointing.
+            # 方案 C: residual refinement applied only to jepa_id_feat, then
+            # added to the EVA cls. Final Linear zero-initialized so the JEPA
+            # contribution = 0 at step 0 and the EVA pretrained ID path is
+            # untouched. Gradient flow lets JEPA grow from there.
+            self.jepa_id_refine = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                LayerNorm(embed_dim),
+                nn.GELU(),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            nn.init.zeros_(self.jepa_id_refine[-1].weight)
+            nn.init.zeros_(self.jepa_id_refine[-1].bias)
             self.grad_checkpointing = True
 
-    def _jepa_rope_shape(self, num_jepa_tokens):
-        spatial_tokens = self.jepa_grid_h * self.jepa_grid_w
-        if spatial_tokens <= 0 or num_jepa_tokens % spatial_tokens != 0:
-            raise ValueError(
-                f"Unexpected JEPA token count {num_jepa_tokens} for "
-                f"{self.jepa_grid_h}x{self.jepa_grid_w} JEPA grid."
-            )
-        temporal_bins = num_jepa_tokens // spatial_tokens
-        return (temporal_bins * self.jepa_grid_h, self.jepa_grid_w)
+    def _jepa_rope_embed(self, num_jepa_tokens):
+        raise RuntimeError("JEPA in-EVA injection has been removed; use jepa_side_path instead.")
 
     def _append_jepa_tokens(self, x, rot_pos_embed, jepa_tokens, repeat_t=None):
-        if self.jepa_adapter is None or jepa_tokens is None:
-            return x, rot_pos_embed
-
-        num_jepa_tokens = jepa_tokens.shape[1]
-        jepa_tokens = self.jepa_adapter(jepa_tokens, x)
-        if repeat_t is not None:
-            jepa_tokens = repeat(jepa_tokens, "B J C -> (B T) J C", T=repeat_t)
-
-        if rot_pos_embed is not None:
-            jepa_rot_pos_embed = self.jepa_rope.get_embed(self._jepa_rope_shape(num_jepa_tokens))
-            jepa_rot_pos_embed = jepa_rot_pos_embed.to(device=rot_pos_embed.device, dtype=rot_pos_embed.dtype)
-            rot_pos_embed = torch.cat([rot_pos_embed, jepa_rot_pos_embed], dim=0)
-
-        x = torch.cat([x, jepa_tokens], dim=1)
-        return x, rot_pos_embed
+        raise RuntimeError("JEPA in-EVA injection has been removed; use jepa_side_path instead.")
 
     def video_forward(self, x,cloth_id,jepa_tokens=None):
-        x, B, T = self.forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
+        x, B, T = self.forward_features(x,cloth_id)
         feat, feat_h = self.forward_head(x, B, T, pre_logits=True)
+        if self.jepa_side is not None and jepa_tokens is not None:
+            jt = jepa_tokens
+            # bin-0 切片:让 jepa_side 输入 N_spatial 严格 = stage1 image-mode
+            # cache 永远返回 3D (B, N_st, 1664), N_st = T_bin * N_spatial
+            # stage1 T=1 -> T_bin=1 -> 全切=no-op; stage2 T=4 -> T_bin=2 -> 取前一半
+            T_bin = max(1, T // 2)
+            N_spatial = jt.shape[1] // T_bin
+            jt = jt[:, :N_spatial]
+            jepa_id_feat, _, _ = self.jepa_side(jt)
+            # 方案 C residual:末层 zero-init -> step 0 贡献=0
+            feat_h = feat_h + self.jepa_id_refine(jepa_id_feat)
         if not self.training:
             return feat_h
         else:
             cls_score = self.head(feat_h)
             return cls_score, [feat_h, feat]
 
-    def forward_features(self, x,cloth_id,jepa_tokens=None):
+    def forward_features(self, x,cloth_id):
         B,C,T,H,W = x.shape
 
         x = rearrange(x ," B C T H W -> (B T) C H W")
@@ -459,7 +443,7 @@ class EZ_Eva_Hybrid(EZ_Eva):
         x = rearrange(x, '(B N) T C -> (B T) N C', N=N)
 
         if self.joint:
-            raise NotImplementedError("JEPA token injection currently supports the default non-joint CSCI-V video path.")
+            raise NotImplementedError("CSCI-V video path does not support joint mode.")
 
         x = self.pos_drop(x)
 
@@ -468,8 +452,6 @@ class EZ_Eva_Hybrid(EZ_Eva):
             x, keep_indices = self.patch_drop(x)
             if rot_pos_embed is not None and keep_indices is not None:
                 rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
-
-        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens, repeat_t=T)
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
@@ -480,27 +462,21 @@ class EZ_Eva_Hybrid(EZ_Eva):
         x = self.norm(x)
         return x, B,T
 
-    def image_forward_features(self, x,cloth_id,jepa_tokens=None):
+    def image_forward_features(self, x,cloth_id):
         x = self.patch_embed(x)
 
         if self.cls_token_img is not None:
             x = torch.cat((self.cls_token_img.expand(x.shape[0], -1, -1), x), dim=1)
 
-        # apply abs position embedding
         if self.pos_embed is not None:
-            # if self.training:
-            # x = x + self.pos_embed + self.cloth_xishu * self.cloth_embed[cloth_id]
             x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        # obtain shared rotary position embedding and apply patch dropout
         rot_pos_embed = self.rope.get_embed() if self.rope is not None else None
         if self.patch_drop is not None:
             x, keep_indices = self.patch_drop(x)
             if rot_pos_embed is not None and keep_indices is not None:
                 rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
-
-        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
@@ -519,14 +495,18 @@ class EZ_Eva_Hybrid(EZ_Eva):
         return x if pre_logits else self.head(x)
 
     def image_forward(self, x,cloth_id,jepa_tokens=None):
-        x = self.image_forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
+        x = self.image_forward_features(x,cloth_id)
         feat = self.forward_image_head(x, pre_logits=True)
+        if self.jepa_side is not None and jepa_tokens is not None:
+            jepa_id_feat, _, _ = self.jepa_side(jepa_tokens)
+            # 方案 C residual:末层 zero-init -> step 0 贡献=0
+            feat = feat + self.jepa_id_refine(jepa_id_feat)
         if not self.training:
             return feat
         else:
             cls_score = self.head_image(feat)
             return cls_score, feat
-    
+
     def forward(self, x,cloth_id,jepa_tokens=None):
         if self.student_mode or x.dim() == 4:
             return self.image_forward(x,cloth_id,jepa_tokens=jepa_tokens)
@@ -551,10 +531,10 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         self.extra_pos_in_temporal = nn.Parameter(torch.zeros(1, 1, embed_dim))
         trunc_normal_(self.extra_pos_in_temporal, std=.02)
 
-    def image_forward_features(self, x,cloth_id,jepa_tokens=None):
-        distentangle_loss = 0 
+    def image_forward_features(self, x,cloth_id):
+        distentangle_loss = 0
         x = self.patch_embed(x)
-        
+
         x = torch.cat((self.cls_token_img.expand(x.shape[0], -1, -1), x), dim=1)
         x = torch.cat((self.extra_token1.expand(x.shape[0], -1, -1), x), dim=1)
 
@@ -569,8 +549,6 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
             x, keep_indices = self.patch_drop(x)
             if rot_pos_embed is not None and keep_indices is not None:
                 rot_pos_embed = apply_keep_indices_nlc(x, rot_pos_embed, keep_indices)
-
-        x, rot_pos_embed = self._append_jepa_tokens(x, rot_pos_embed, jepa_tokens)
 
         for blk in self.blocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
@@ -593,17 +571,31 @@ class EZ_Eva_Extra_tokens_Pose(EZ_Eva_Hybrid):
         return x if pre_logits else self.head(x)
 
     def image_forward(self, x,cloth_id,jepa_tokens=None):
-        x, distentangle_loss = self.image_forward_features(x,cloth_id,jepa_tokens=jepa_tokens)
+        x, distentangle_loss = self.image_forward_features(x,cloth_id)
         extra_token_feats = x[:,0]
         default = x[:,1:]
         feat = self.forward_image_head(default, pre_logits=True)
+
+        # JEPA side path: independent transformer over raw JEPA tokens with its
+        # own jepa_id_token + jepa_color_token, internal CSCI triple
+        # (L_MSE_JEPA + L_DE_JEPA between jepa_id_out and jepa_color_out).
+        jepa_id_feat = None
+        jepa_color_pred = None
+        jepa_dist_loss = None
+        if self.jepa_side is not None and jepa_tokens is not None:
+            jepa_id_feat, jepa_color_pred, jepa_dist_loss = self.jepa_side(jepa_tokens)
+            # 方案 C residual:末层 zero-init -> step 0 贡献=0
+            feat = feat + self.jepa_id_refine(jepa_id_feat)
+
         if not self.training:
             return feat
         else:
             cls_score = self.head_image(feat)
             extra_token = self.mlp(self.norm2(extra_token_feats))
             distentangle_loss += self.distentangle(extra_token_feats, feat)
-            return cls_score, feat, extra_token, extra_token_feats, distentangle_loss
+            if jepa_dist_loss is not None:
+                distentangle_loss = distentangle_loss + jepa_dist_loss
+            return cls_score, feat, extra_token, extra_token_feats, distentangle_loss, jepa_color_pred
             
     def load_param(self, trained_path, load_head=True):
         super().load_param(trained_path=trained_path, load_head=load_head) 
